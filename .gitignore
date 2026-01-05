@@ -1,0 +1,23 @@
+# Environment variables (contains secrets)
+.env
+
+# State file
+polymarket_state.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.so
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Virtual environments
+venv/
+env/
+.venv/
