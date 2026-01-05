@@ -295,20 +295,26 @@ def fetch_with_retry(url: str, params: Dict[str, Any]) -> Optional[requests.Resp
     return None
 
 
-def fetch_all_events(limit_per_page: int = 100) -> List[Dict]:
+def fetch_all_events(limit_per_page: int = 100, max_events: int = 500) -> List[Dict]:
     """
-    Fetch all events from Polymarket, handling pagination.
-    Events are sorted by ID descending (newest first).
+    Fetch active/trending events from Polymarket.
+    Only fetches open events sorted by volume (most active first).
+    Limited to prevent OOM on low-memory servers.
+
+    Args:
+        limit_per_page: Number of events per API call
+        max_events: Maximum total events to fetch (default 500)
     """
     all_events = []
     offset = 0
 
-    while True:
+    while len(all_events) < max_events:
         params = {
             'limit': limit_per_page,
             'offset': offset,
-            'order': 'id',
-            'ascending': 'false'
+            'active': 'true',  # Only active/open events
+            'order': 'volume24hr',  # Sort by 24h volume (trending)
+            'ascending': 'false'  # Highest volume first
         }
 
         response = fetch_with_retry(EVENTS_API_URL, params)
@@ -328,21 +334,30 @@ def fetch_all_events(limit_per_page: int = 100) -> List[Dict]:
 
         offset += limit_per_page
 
+    # Trim to max_events if we got more
+    all_events = all_events[:max_events]
     return all_events
 
 
-def fetch_all_markets(limit_per_page: int = 100) -> List[Dict]:
+def fetch_all_markets(limit_per_page: int = 100, max_markets: int = 1000) -> List[Dict]:
     """
-    Fetch all active markets from Polymarket, handling pagination.
+    Fetch active markets from Polymarket, sorted by volume (trending).
+    Limited to prevent OOM on low-memory servers.
+
+    Args:
+        limit_per_page: Number of markets per API call
+        max_markets: Maximum total markets to fetch (default 1000)
     """
     all_markets = []
     offset = 0
 
-    while True:
+    while len(all_markets) < max_markets:
         params = {
             'limit': limit_per_page,
             'offset': offset,
-            'active': 'true'
+            'active': 'true',
+            'order': 'volume24hr',  # Sort by 24h volume (trending)
+            'ascending': 'false'  # Highest volume first
         }
 
         response = fetch_with_retry(MARKETS_API_URL, params)
@@ -362,6 +377,8 @@ def fetch_all_markets(limit_per_page: int = 100) -> List[Dict]:
 
         offset += limit_per_page
 
+    # Trim to max_markets if we got more
+    all_markets = all_markets[:max_markets]
     return all_markets
 
 
@@ -591,13 +608,13 @@ def monitor_polymarket():
     # Send startup notification (only if not first run)
     if telegram_bot and not state.first_run:
         startup_message = (
-            f"🤖 <b>Polymarket Monitor Bot Started</b>\n\n"
-            f"<b>Volume Thresholds:</b>\n"
-            f"  • Percent: {VOLUME_PERCENT_THRESHOLD}%\n"
-            f"  • Absolute: ${VOLUME_ABSOLUTE_THRESHOLD:,}\n\n"
+            f"🤖 <b>Polymarket Volume Spike Monitor Started</b>\n\n"
+            f"<b>Alert Thresholds:</b>\n"
+            f"  • Volume increase: {VOLUME_PERCENT_THRESHOLD}%\n"
+            f"  • Or absolute: ${VOLUME_ABSOLUTE_THRESHOLD:,}\n\n"
             f"<b>Check Interval:</b> {CHECK_INTERVAL_SECONDS} seconds\n"
-            f"<b>Tracking:</b> {len(state.market_volumes)} markets\n\n"
-            f"Monitoring started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            f"<b>Tracking:</b> {len(state.market_volumes)} trending markets\n\n"
+            f"Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         send_telegram_message(startup_message)
 
@@ -608,11 +625,7 @@ def monitor_polymarket():
         logger.info(f"Starting check #{iteration}...")
 
         try:
-            # Fetch all events and markets
-            logger.info("Fetching events...")
-            events = fetch_all_events()
-            logger.info(f"Fetched {len(events)} events")
-
+            # Fetch markets (sorted by volume - trending)
             logger.info("Fetching markets...")
             markets = fetch_all_markets()
             logger.info(f"Fetched {len(markets)} active markets")
@@ -622,15 +635,6 @@ def monitor_polymarket():
 
             if skip_alerts:
                 logger.info("First run - populating baseline state (no alerts will be sent)")
-
-            # Detect new events
-            new_events = detect_new_events(events, state, skip_alerts=skip_alerts)
-            if new_events:
-                logger.info(f"Found {len(new_events)} new event(s)!")
-                for event in new_events:
-                    alert_new_event(event)
-            else:
-                logger.info("No new events detected")
 
             # Detect volume spikes
             spikes = detect_volume_spikes(markets, state, skip_alerts=skip_alerts)
@@ -649,9 +653,8 @@ def monitor_polymarket():
                     send_telegram_message(
                         f"🤖 <b>Polymarket Monitor Initialized</b>\n\n"
                         f"Baseline established. Now tracking:\n"
-                        f"  • {len(events)} events\n"
-                        f"  • {len(state.market_volumes)} markets\n\n"
-                        f"Future alerts will be sent for new activity."
+                        f"  • {len(state.market_volumes)} markets (by volume)\n\n"
+                        f"Alerts will be sent for volume spikes."
                     )
 
             # Cleanup stale markets periodically (every 10 iterations)
