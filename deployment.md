@@ -1,89 +1,98 @@
 # Polymarket Monitor - VPS Deployment Guide
 
+This guide walks you through deploying the Polymarket Monitor bot on a VPS for 24/7 operation.
+
 ## Prerequisites
 
-- VPS with Ubuntu/Debian (or similar Linux)
+- VPS with Ubuntu/Debian (DigitalOcean, Linode, AWS, etc.)
 - Python 3.9+
 - SSH access to your VPS
+- Telegram bot token and chat ID
 
 ---
 
-## 1. Upload Files to VPS
+## Step 1: Clone Repository to VPS
 
-From your local machine:
-
+SSH into your server:
 ```bash
-# Create directory on VPS
-ssh user@your-vps "mkdir -p ~/polymarket_monitor"
-
-# Upload files
-scp main.py fetch_chatID.py .env requirements.txt user@your-vps:~/polymarket_monitor/
+ssh user@your-server-ip
 ```
 
-Or clone from git if you've pushed to a repo:
-
+Clone the repository:
 ```bash
-ssh user@your-vps
 git clone https://github.com/yourusername/polymarket_monitor.git
 cd polymarket_monitor
 ```
 
+> **Tip**: For private repos, use a personal access token:
+> ```bash
+> git clone https://username:token@github.com/username/polymarket_monitor.git
+> ```
+
 ---
 
-## 2. Install Dependencies
+## Step 2: Set Up Python Environment
 
-SSH into your VPS:
-
+Install Python if not already installed:
 ```bash
-ssh user@your-vps
-cd ~/polymarket_monitor
-
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# Install dependencies
-pip install python-telegram-bot python-dotenv requests
+sudo apt update && sudo apt install -y python3 python3-pip python3-venv
 ```
 
-Or if you have a requirements.txt:
+Create and activate virtual environment:
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
 
+Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
 ---
 
-## 3. Configure Environment
+## Step 3: Configure Environment Variables
 
+Create the `.env` file:
 ```bash
-# Edit your .env file
 nano .env
 ```
 
-Ensure these are set:
-
+Add your configuration:
 ```
-TELEGRAM_BOT_TOKEN=your_token
-TELEGRAM_CHAT_ID=your_chat_id
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+TELEGRAM_CHAT_ID=your_chat_id_here
 ENABLE_TELEGRAM=true
+VOLUME_PERCENT_THRESHOLD=300
+VOLUME_ABSOLUTE_THRESHOLD=50000
+CHECK_INTERVAL_SECONDS=120
+STATE_FILE=polymarket_state.json
 LOG_LEVEL=INFO
 ```
 
+Save and exit: `Ctrl+X` → `Y` → `Enter`
+
 ---
 
-## 4. Deployment Options
+## Step 4: Test the Bot
 
-### Option A: systemd (Recommended)
+```bash
+source venv/bin/activate
+python main.py
+```
 
-Create a systemd service file:
+You should receive a Telegram message. Press `Ctrl+C` to stop.
 
+---
+
+## Step 5: Set Up systemd Service (Recommended)
+
+Create the service file:
 ```bash
 sudo nano /etc/systemd/system/polymarket-monitor.service
 ```
 
-Paste this content (adjust paths and username):
-
+Paste this content (adjust `User` and paths if needed):
 ```ini
 [Unit]
 Description=Polymarket Monitor Bot
@@ -91,262 +100,87 @@ After=network.target
 
 [Service]
 Type=simple
-User=your_username
-WorkingDirectory=/home/your_username/polymarket_monitor
-Environment=PATH=/home/your_username/polymarket_monitor/venv/bin
-ExecStart=/home/your_username/polymarket_monitor/venv/bin/python main.py
+User=trader
+WorkingDirectory=/home/trader/polymarket_monitor
+ExecStart=/home/trader/polymarket_monitor/venv/bin/python main.py
 Restart=always
 RestartSec=10
-
-# Logging
-StandardOutput=append:/var/log/polymarket-monitor.log
-StandardError=append:/var/log/polymarket-monitor.log
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Enable and start:
+Save and exit.
 
+Enable and start the service:
 ```bash
-# Reload systemd
 sudo systemctl daemon-reload
-
-# Enable on boot
 sudo systemctl enable polymarket-monitor
-
-# Start the service
 sudo systemctl start polymarket-monitor
+```
 
-# Check status
+Verify it's running:
+```bash
 sudo systemctl status polymarket-monitor
 ```
 
-**Useful commands:**
-
-```bash
-# View logs
-sudo journalctl -u polymarket-monitor -f
-
-# Or check log file
-tail -f /var/log/polymarket-monitor.log
-
-# Restart
-sudo systemctl restart polymarket-monitor
-
-# Stop
-sudo systemctl stop polymarket-monitor
-```
+You should see `active (running)` in green.
 
 ---
 
-### Option B: PM2 (If you're already using it for other bots)
+## Managing the Service
+
+| Action | Command |
+|--------|---------|
+| Check status | `sudo systemctl status polymarket-monitor` |
+| Start | `sudo systemctl start polymarket-monitor` |
+| Stop | `sudo systemctl stop polymarket-monitor` |
+| Restart | `sudo systemctl restart polymarket-monitor` |
+| View live logs | `journalctl -u polymarket-monitor -f` |
+| View recent logs | `journalctl -u polymarket-monitor --since "1 hour ago"` |
+| Check if running | `sudo systemctl is-active polymarket-monitor` |
+
+---
+
+## Updating the Bot
+
+When you push updates to GitHub:
 
 ```bash
-# Install PM2 if not already installed
-npm install -g pm2
-
 cd ~/polymarket_monitor
-
-# Start with PM2
-pm2 start main.py --name polymarket-monitor --interpreter ./venv/bin/python
-
-# Save PM2 process list
-pm2 save
-
-# Set PM2 to start on boot (if not already done)
-pm2 startup
-```
-
-**Useful commands:**
-
-```bash
-# View logs
-pm2 logs polymarket-monitor
-
-# Restart
-pm2 restart polymarket-monitor
-
-# Stop
-pm2 stop polymarket-monitor
-
-# List all processes
-pm2 list
+git pull
+sudo systemctl restart polymarket-monitor
 ```
 
 ---
 
-### Option C: Docker
+## Running Multiple Bots
 
-Create a `Dockerfile`:
+Each bot gets its own:
+1. Directory (e.g., `/home/trader/bot1`, `/home/trader/bot2`)
+2. Virtual environment (`venv` folder inside each)
+3. systemd service file (different names)
 
-```dockerfile
-FROM python:3.11-slim
+They run independently without conflicts.
 
-WORKDIR /app
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY main.py .
-COPY .env .
-
-CMD ["python", "main.py"]
-```
-
-Create `requirements.txt` if not exists:
-
-```
-python-telegram-bot>=20.0
-python-dotenv>=1.0.0
-requests>=2.28.0
-```
-
-Build and run:
-
+List all your services:
 ```bash
-# Build image
-docker build -t polymarket-monitor .
-
-# Run container
-docker run -d \
-  --name polymarket-monitor \
-  --restart unless-stopped \
-  -v $(pwd)/polymarket_state.json:/app/polymarket_state.json \
-  polymarket-monitor
-```
-
-**Useful commands:**
-
-```bash
-# View logs
-docker logs -f polymarket-monitor
-
-# Restart
-docker restart polymarket-monitor
-
-# Stop
-docker stop polymarket-monitor
+systemctl list-units --type=service | grep your-keyword
 ```
 
 ---
 
-### Option D: Docker Compose (If running multiple containers)
-
-Create `docker-compose.yml`:
-
-```yaml
-version: '3.8'
-
-services:
-  polymarket-monitor:
-    build: .
-    container_name: polymarket-monitor
-    restart: unless-stopped
-    volumes:
-      - ./polymarket_state.json:/app/polymarket_state.json
-    environment:
-      - TZ=UTC
-```
-
-Run:
-
-```bash
-docker-compose up -d
-```
-
----
-
-## 5. Running Alongside Other Bots
-
-Since you have another bot running, here's how to manage multiple bots:
-
-### If using systemd:
-Each bot gets its own service file. They run independently.
-
-```bash
-# List all your services
-systemctl list-units --type=service | grep -E "(polymarket|your-other-bot)"
-```
-
-### If using PM2:
-PM2 handles multiple processes natively.
-
-```bash
-# View all running processes
-pm2 list
-
-# Expected output:
-# ┌─────────────────────┬────┬─────────┬──────┐
-# │ Name                │ id │ status  │ cpu  │
-# ├─────────────────────┼────┼─────────┼──────┤
-# │ your-other-bot      │ 0  │ online  │ 0.1% │
-# │ polymarket-monitor  │ 1  │ online  │ 0.2% │
-# └─────────────────────┴────┴─────────┴──────┘
-```
-
-### If using Docker:
-Each container runs independently.
-
-```bash
-# View all containers
-docker ps
-```
-
----
-
-## 6. Monitoring & Maintenance
-
-### Check if running:
-
-```bash
-# systemd
-sudo systemctl is-active polymarket-monitor
-
-# PM2
-pm2 status polymarket-monitor
-
-# Docker
-docker ps | grep polymarket
-```
-
-### View resource usage:
-
-```bash
-# systemd - check with htop or:
-ps aux | grep main.py
-
-# PM2
-pm2 monit
-
-# Docker
-docker stats polymarket-monitor
-```
-
-### Update the bot:
-
-```bash
-# Stop the service
-sudo systemctl stop polymarket-monitor  # or pm2 stop / docker stop
-
-# Upload new files or git pull
-git pull  # if using git
-
-# Restart
-sudo systemctl start polymarket-monitor  # or pm2 restart / docker restart
-```
-
----
-
-## 7. Troubleshooting
+## Troubleshooting
 
 ### Bot not starting?
 
+Check logs for errors:
 ```bash
-# Check logs
 sudo journalctl -u polymarket-monitor -n 50 --no-pager
+```
 
-# Test manually
+Test manually:
+```bash
 cd ~/polymarket_monitor
 source venv/bin/activate
 python main.py
@@ -354,30 +188,67 @@ python main.py
 
 ### Telegram not working?
 
+Verify bot token:
 ```bash
-# Test bot token
 curl "https://api.telegram.org/bot<YOUR_TOKEN>/getMe"
+```
 
-# Check .env is loaded
+Check `.env` is configured:
+```bash
 cat .env
 ```
 
-### State file permission issues?
+### Permission issues?
 
+Ensure correct ownership:
 ```bash
-# Ensure correct ownership
-sudo chown your_username:your_username polymarket_state.json
-chmod 644 polymarket_state.json
+sudo chown -R trader:trader ~/polymarket_monitor
 ```
 
 ---
 
-## Quick Reference
+## Alternative: PM2
 
-| Action | systemd | PM2 | Docker |
-|--------|---------|-----|--------|
-| Start | `systemctl start polymarket-monitor` | `pm2 start polymarket-monitor` | `docker start polymarket-monitor` |
-| Stop | `systemctl stop polymarket-monitor` | `pm2 stop polymarket-monitor` | `docker stop polymarket-monitor` |
-| Restart | `systemctl restart polymarket-monitor` | `pm2 restart polymarket-monitor` | `docker restart polymarket-monitor` |
-| Logs | `journalctl -u polymarket-monitor -f` | `pm2 logs polymarket-monitor` | `docker logs -f polymarket-monitor` |
-| Status | `systemctl status polymarket-monitor` | `pm2 status` | `docker ps` |
+If you prefer PM2 (Node.js process manager):
+
+```bash
+npm install -g pm2
+cd ~/polymarket_monitor
+pm2 start main.py --name polymarket-monitor --interpreter ./venv/bin/python
+pm2 save
+pm2 startup
+```
+
+| Action | Command |
+|--------|---------|
+| Status | `pm2 status` |
+| Logs | `pm2 logs polymarket-monitor` |
+| Restart | `pm2 restart polymarket-monitor` |
+| Stop | `pm2 stop polymarket-monitor` |
+
+---
+
+## Alternative: Docker
+
+Create `Dockerfile`:
+```dockerfile
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY main.py .env ./
+CMD ["python", "main.py"]
+```
+
+Build and run:
+```bash
+docker build -t polymarket-monitor .
+docker run -d --name polymarket-monitor --restart unless-stopped polymarket-monitor
+```
+
+| Action | Command |
+|--------|---------|
+| Status | `docker ps` |
+| Logs | `docker logs -f polymarket-monitor` |
+| Restart | `docker restart polymarket-monitor` |
+| Stop | `docker stop polymarket-monitor` |
