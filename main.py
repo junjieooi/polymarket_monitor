@@ -727,8 +727,8 @@ def detect_suspicious_activity(
             if wallet_political_trades[wallet] >= POLITICAL_REPEAT_THRESHOLD:
                 flags.append(f"POLITICAL_REPEAT ({wallet_political_trades[wallet]}x)")
 
-        # Only flag if at least one suspicious pattern detected
-        if flags:
+        # Only flag if LARGE BET + at least one other suspicious pattern
+        if is_large_bet and len(flags) >= 2:
             activity = SuspiciousActivity(
                 wallet=wallet,
                 trade_size_usd=usd_size,
@@ -971,7 +971,7 @@ def monitor_polymarket():
             if not skip_alerts:
                 logger.info("Scanning for suspicious activity...")
                 # Fetch recent large trades
-                recent_trades = fetch_recent_trades(limit=100, min_usd=LARGE_BET_THRESHOLD / 10)
+                recent_trades = fetch_recent_trades(limit=100, min_usd=LARGE_BET_THRESHOLD)
                 logger.info(f"Fetched {len(recent_trades)} recent trades for analysis")
 
                 # Refresh political events periodically
