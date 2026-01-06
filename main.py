@@ -46,9 +46,14 @@ ENABLE_TELEGRAM = os.getenv("ENABLE_TELEGRAM", "true").lower() == "true"
 
 # Suspicious activity thresholds
 LARGE_BET_THRESHOLD = float(os.getenv("LARGE_BET_THRESHOLD", "10000"))  # USD
-FRESH_WALLET_MAX_TRADES = int(os.getenv("FRESH_WALLET_MAX_TRADES", "5"))  # Max trades to be "fresh"
+FRESH_WALLET_MAX_TRADES = int(os.getenv("FRESH_WALLET_MAX_TRADES", "0"))  # 0 = completely new wallet (first trade ever)
 POLITICAL_REPEAT_THRESHOLD = int(os.getenv("POLITICAL_REPEAT_THRESHOLD", "3"))  # Repeated entries
 MAX_BUY_PRICE = float(os.getenv("MAX_BUY_PRICE", "0.70"))  # Max price to track (filters out 99% bots)
+
+# Political keywords for market detection
+POLITICAL_KEYWORDS = ['election', 'president', 'trump', 'biden', 'congress',
+                      'senate', 'governor', 'vote', 'primary', 'democrat',
+                      'republican', 'political', 'politician', 'poll']
 
 # Monitoring interval
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "120"))
@@ -320,10 +325,6 @@ def fetch_political_events() -> List[int]:
     Fetch event IDs for political markets.
     Returns list of event IDs that match political keywords.
     """
-    political_keywords = ['election', 'president', 'trump', 'biden', 'congress',
-                          'senate', 'governor', 'vote', 'primary', 'democrat',
-                          'republican', 'political', 'politician', 'poll']
-
     params = {
         'limit': 100,
         'active': 'true',
@@ -344,7 +345,7 @@ def fetch_political_events() -> List[int]:
             slug = (event.get('slug', '') or '').lower()
 
             combined_text = f"{title} {description} {slug}"
-            if any(kw in combined_text for kw in political_keywords):
+            if any(kw in combined_text for kw in POLITICAL_KEYWORDS):
                 event_id = event.get('id')
                 if event_id:
                     political_event_ids.append(int(event_id))
@@ -363,6 +364,7 @@ class SuspiciousActivity:
     """Represents a flagged suspicious activity."""
     wallet: str
     trade_size_usd: float
+    price: float  # The price/odds of the trade
     market_title: str
     market_slug: str
     event_slug: str
@@ -447,7 +449,7 @@ def detect_suspicious_activity(
 
         # Create unique key for dedup
         trade_key = f"{wallet}_{condition_id}_{timestamp}"
-        if hasattr(state, 'seen_suspicious') and trade_key in state.seen_suspicious:
+        if trade_key in state.seen_suspicious:
             continue
 
         flags = []
@@ -457,13 +459,12 @@ def detect_suspicious_activity(
         if is_large_bet:
             flags.append(f"LARGE_BET (${usd_size:,.0f})")
 
-        # Check 2: Is this a fresh wallet?
+        # Check 2: Is this a fresh wallet (first trade ever)?
         is_fresh, total_trades = analyze_wallet_freshness(wallet, cached_wallet_data)
         if is_fresh:
-            flags.append(f"FRESH_WALLET ({total_trades} trades)")
+            flags.append(f"FRESH_WALLET ({total_trades} history)")
 
-        # Check 3: Is this a political market with repeated entries?
-        # Check if this trade's event is in political events
+        # Check 3: Is this a political market?
         is_political = False
         try:
             # Try to match by event slug or condition
@@ -471,14 +472,11 @@ def detect_suspicious_activity(
                 if str(pid) in condition_id or str(pid) in event_slug:
                     is_political = True
                     break
-        except:
+        except Exception:
             pass
 
         # Also check by market title keywords
-        political_keywords = ['election', 'president', 'trump', 'biden', 'congress',
-                              'senate', 'governor', 'vote', 'primary', 'democrat',
-                              'republican', 'political']
-        if any(kw in market_title.lower() for kw in political_keywords):
+        if any(kw in market_title.lower() for kw in POLITICAL_KEYWORDS):
             is_political = True
 
         if is_political:
@@ -486,11 +484,17 @@ def detect_suspicious_activity(
             if wallet_political_trades[wallet] >= POLITICAL_REPEAT_THRESHOLD:
                 flags.append(f"POLITICAL_REPEAT ({wallet_political_trades[wallet]}x)")
 
-        # Only flag if LARGE BET + at least one other suspicious pattern
-        if is_large_bet and len(flags) >= 2:
+        # Flag if: (fresh wallet + BUY + political) OR (large bet + another pattern)
+        is_fresh_political_buy = is_fresh and side == 'BUY' and is_political
+        if is_fresh_political_buy:
+            flags.append("POLITICAL_BUY")
+
+        should_flag = is_fresh_political_buy or (is_large_bet and len(flags) >= 2)
+        if should_flag:
             activity = SuspiciousActivity(
                 wallet=wallet,
                 trade_size_usd=usd_size,
+                price=price,
                 market_title=market_title,
                 market_slug=market_slug,
                 event_slug=event_slug,
@@ -504,8 +508,6 @@ def detect_suspicious_activity(
             suspicious.append(activity)
 
             # Mark as seen
-            if not hasattr(state, 'seen_suspicious'):
-                state.seen_suspicious = set()
             state.seen_suspicious.add(trade_key)
 
     return suspicious
@@ -533,6 +535,7 @@ def alert_suspicious_activity(activity: SuspiciousActivity):
     logger.info(f"Wallet: {activity.wallet}")
     logger.info(f"Flags: {', '.join(activity.flags)}")
     logger.info(f"Trade Size: ${activity.trade_size_usd:,.2f}")
+    logger.info(f"Odds: {activity.price*100:.0f}%")
     logger.info(f"Position: {position}")
     logger.info(f"Market: {activity.market_title}")
     logger.info(f"Wallet Total Trades: {activity.wallet_total_trades}")
@@ -563,6 +566,7 @@ def alert_suspicious_activity(activity: SuspiciousActivity):
             f"<b>Flags:</b> {flags_str}\n\n"
             f"<b>Wallet:</b>\n<code>{activity.wallet}</code>\n\n"
             f"<b>Trade Size:</b> ${activity.trade_size_usd:,.2f}\n"
+            f"<b>Odds:</b> {activity.price*100:.0f}%\n"
             f"<b>Position:</b> {position_display}\n"
             f"<b>Market:</b> {safe_title}\n"
             f"<b>Wallet History:</b> {activity.wallet_total_trades} total trades\n"
