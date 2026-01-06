@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Polymarket Real-Time Monitor Bot with Telegram Notifications
-Detects new markets and volume spikes on Polymarket using the public Gamma API.
+Detects suspicious activity on Polymarket using the public Gamma API.
 Sends alerts via Telegram bot.
 """
 
@@ -13,8 +13,8 @@ import html
 import signal
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any, Set
+from datetime import datetime
+from typing import Dict, List, Optional, Any, Set, Tuple
 import asyncio
 from telegram import Bot
 from telegram.error import TelegramError
@@ -44,10 +44,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 ENABLE_TELEGRAM = os.getenv("ENABLE_TELEGRAM", "true").lower() == "true"
 
-# Volume spike thresholds (configurable via env vars)
-VOLUME_PERCENT_THRESHOLD = int(os.getenv("VOLUME_PERCENT_THRESHOLD", "300"))
-VOLUME_ABSOLUTE_THRESHOLD = int(os.getenv("VOLUME_ABSOLUTE_THRESHOLD", "50000"))
-
 # Suspicious activity thresholds
 LARGE_BET_THRESHOLD = float(os.getenv("LARGE_BET_THRESHOLD", "10000"))  # USD
 FRESH_WALLET_MAX_TRADES = int(os.getenv("FRESH_WALLET_MAX_TRADES", "5"))  # Max trades to be "fresh"
@@ -59,7 +55,6 @@ CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "120"))
 
 # API endpoints
 EVENTS_API_URL = "https://gamma-api.polymarket.com/events"
-MARKETS_API_URL = "https://gamma-api.polymarket.com/markets"
 DATA_API_URL = "https://data-api.polymarket.com"
 
 # Persistence
@@ -69,9 +64,6 @@ STATE_FILE = os.getenv("STATE_FILE", "polymarket_state.json")
 REQUEST_TIMEOUT = 30
 MAX_RETRIES = 3
 RETRY_DELAYS = [1, 2, 4]  # Exponential backoff delays in seconds
-
-# Stale market cleanup (days)
-STALE_MARKET_DAYS = 7
 
 # Telegram rate limiting
 TELEGRAM_MESSAGE_DELAY = 0.1  # Seconds between messages
@@ -143,7 +135,7 @@ def send_test_message():
 
     try:
         test_message = (
-            f"✅ <b>Polymarket Volume Tracking</b>\n\n"
+            f"✅ <b>Polymarket Suspicious Activity Monitor</b>\n\n"
             f"Telegram bot connected successfully!\n"
             f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
@@ -186,13 +178,10 @@ def send_telegram_message(message: str, parse_mode: str = 'HTML'):
 # ============================================================================
 
 class MonitorState:
-    """Manages the monitoring state (max event ID and market volumes)."""
+    """Manages the monitoring state for suspicious activity detection."""
 
     def __init__(self, state_file: Optional[str] = None):
         self.state_file = state_file
-        self.max_event_id: int = 0
-        self.market_volumes: Dict[str, float] = {}
-        self.market_last_seen: Dict[str, str] = {}  # Track when markets were last seen
         self.seen_suspicious: Set[str] = set()  # Track seen suspicious activity
         self.first_run: bool = True
         self._dirty: bool = False  # Track if state needs saving
@@ -204,13 +193,9 @@ class MonitorState:
             try:
                 with open(self.state_file, 'r') as f:
                     data = json.load(f)
-                    self.max_event_id = data.get('max_event_id', 0)
-                    self.market_volumes = data.get('market_volumes', {})
-                    self.market_last_seen = data.get('market_last_seen', {})
                     self.seen_suspicious = set(data.get('seen_suspicious', []))
                     self.first_run = False  # Not first run if we loaded state
                     logger.info(f"Loaded state from {self.state_file}")
-                    logger.info(f"Max event ID: {self.max_event_id}, Tracking {len(self.market_volumes)} markets")
             except FileNotFoundError:
                 logger.info("No existing state file found. Starting fresh (initialization mode).")
                 self.first_run = True
@@ -228,9 +213,6 @@ class MonitorState:
                 # Keep only recent seen_suspicious entries (last 1000)
                 recent_suspicious = list(self.seen_suspicious)[-1000:]
                 json.dump({
-                    'max_event_id': self.max_event_id,
-                    'market_volumes': self.market_volumes,
-                    'market_last_seen': self.market_last_seen,
                     'seen_suspicious': recent_suspicious
                 }, f, indent=2)
             self._dirty = False
@@ -241,44 +223,6 @@ class MonitorState:
     def mark_dirty(self):
         """Mark state as needing to be saved."""
         self._dirty = True
-
-    def update_max_event_id(self, event_id: int):
-        """Update the maximum event ID seen (without immediate save)."""
-        if event_id > self.max_event_id:
-            self.max_event_id = event_id
-            self.mark_dirty()
-
-    def update_market_volume(self, market_id: str, volume: float):
-        """Update the stored volume for a market (without immediate save)."""
-        self.market_volumes[market_id] = volume
-        self.market_last_seen[market_id] = datetime.now().isoformat()
-        self.mark_dirty()
-
-    def get_previous_volume(self, market_id: str) -> Optional[float]:
-        """Get the previously stored volume for a market."""
-        return self.market_volumes.get(market_id)
-
-    def cleanup_stale_markets(self, days: int = STALE_MARKET_DAYS):
-        """Remove markets not seen in the specified number of days."""
-        cutoff = datetime.now() - timedelta(days=days)
-        stale_markets = []
-
-        for market_id, last_seen_str in list(self.market_last_seen.items()):
-            try:
-                last_seen = datetime.fromisoformat(last_seen_str)
-                if last_seen < cutoff:
-                    stale_markets.append(market_id)
-            except (ValueError, TypeError):
-                # Invalid date, remove it
-                stale_markets.append(market_id)
-
-        for market_id in stale_markets:
-            self.market_volumes.pop(market_id, None)
-            self.market_last_seen.pop(market_id, None)
-
-        if stale_markets:
-            logger.info(f"Cleaned up {len(stale_markets)} stale markets (not seen in {days} days)")
-            self.mark_dirty()
 
     def complete_first_run(self):
         """Mark first run as complete."""
@@ -307,92 +251,6 @@ def fetch_with_retry(url: str, params: Dict[str, Any]) -> Optional[requests.Resp
                 return None
     return None
 
-
-def fetch_all_events(limit_per_page: int = 100, max_events: int = 500) -> List[Dict]:
-    """
-    Fetch active/trending events from Polymarket.
-    Only fetches open events sorted by volume (most active first).
-    Limited to prevent OOM on low-memory servers.
-
-    Args:
-        limit_per_page: Number of events per API call
-        max_events: Maximum total events to fetch (default 500)
-    """
-    all_events = []
-    offset = 0
-
-    while len(all_events) < max_events:
-        params = {
-            'limit': limit_per_page,
-            'offset': offset,
-            'active': 'true',  # Only active/open events
-            'order': 'volume24hr',  # Sort by 24h volume (trending)
-            'ascending': 'false'  # Highest volume first
-        }
-
-        response = fetch_with_retry(EVENTS_API_URL, params)
-        if response is None:
-            logger.error(f"Failed to fetch events at offset {offset}")
-            break
-
-        events = response.json()
-
-        if not events:
-            break
-
-        all_events.extend(events)
-
-        if len(events) < limit_per_page:
-            break
-
-        offset += limit_per_page
-
-    # Trim to max_events if we got more
-    all_events = all_events[:max_events]
-    return all_events
-
-
-def fetch_all_markets(limit_per_page: int = 100, max_markets: int = 1000) -> List[Dict]:
-    """
-    Fetch active markets from Polymarket, sorted by volume (trending).
-    Limited to prevent OOM on low-memory servers.
-
-    Args:
-        limit_per_page: Number of markets per API call
-        max_markets: Maximum total markets to fetch (default 1000)
-    """
-    all_markets = []
-    offset = 0
-
-    while len(all_markets) < max_markets:
-        params = {
-            'limit': limit_per_page,
-            'offset': offset,
-            'active': 'true',
-            'order': 'volume24hr',  # Sort by 24h volume (trending)
-            'ascending': 'false'  # Highest volume first
-        }
-
-        response = fetch_with_retry(MARKETS_API_URL, params)
-        if response is None:
-            logger.error(f"Failed to fetch markets at offset {offset}")
-            break
-
-        markets = response.json()
-
-        if not markets:
-            break
-
-        all_markets.extend(markets)
-
-        if len(markets) < limit_per_page:
-            break
-
-        offset += limit_per_page
-
-    # Trim to max_markets if we got more
-    all_markets = all_markets[:max_markets]
-    return all_markets
 
 
 def fetch_recent_trades(limit: int = 100, min_usd: float = None) -> List[Dict]:
@@ -497,113 +355,6 @@ def fetch_political_events() -> List[int]:
 
 
 # ============================================================================
-# DETECTION FUNCTIONS
-# ============================================================================
-
-def get_volume_from_market(market: Dict) -> float:
-    """
-    Extract volume from market data, checking multiple possible fields.
-    Uses proper None checks instead of truthy checks to handle 0 values correctly.
-    """
-    # Check fields in order of preference
-    for field in ['volume24hr', 'volume24hrClob', 'volumeNum']:
-        value = market.get(field)
-        if value is not None:
-            try:
-                return float(value)
-            except (ValueError, TypeError):
-                continue
-    return 0.0
-
-
-def detect_new_events(events: List[Dict], state: MonitorState, skip_alerts: bool = False) -> List[Dict]:
-    """
-    Detect new events that have appeared since last check.
-    Returns list of new events.
-
-    Args:
-        events: List of event dictionaries
-        state: Monitor state object
-        skip_alerts: If True, updates state but returns empty list (for first run)
-    """
-    new_events = []
-
-    for event in events:
-        try:
-            event_id = int(event.get('id', 0))
-
-            # If this event ID is higher than our max, it's new
-            if event_id > state.max_event_id:
-                if not skip_alerts:
-                    new_events.append(event)
-                state.update_max_event_id(event_id)
-        except (ValueError, TypeError):
-            continue
-
-    return new_events
-
-
-def detect_volume_spikes(markets: List[Dict], state: MonitorState, skip_alerts: bool = False) -> List[Tuple[Dict, float, float, float]]:
-    """
-    Detect volume spikes on existing markets.
-    Returns list of tuples: (market, current_volume, previous_volume, percent_increase)
-
-    Args:
-        markets: List of market dictionaries
-        state: Monitor state object
-        skip_alerts: If True, updates state but returns empty list (for first run)
-    """
-    spikes = []
-
-    for market in markets:
-        try:
-            market_id = market.get('id')
-            if not market_id:
-                continue
-
-            # Get volume using proper None checks
-            current_volume = get_volume_from_market(market)
-
-            # Skip if no volume data
-            if current_volume == 0:
-                state.update_market_volume(market_id, current_volume)
-                continue
-
-            # Get previous volume
-            previous_volume = state.get_previous_volume(market_id)
-
-            # If this is the first time seeing this market, just store it
-            if previous_volume is None:
-                state.update_market_volume(market_id, current_volume)
-                continue
-
-            # Calculate changes
-            volume_increase = current_volume - previous_volume
-
-            # Skip if volume decreased or stayed the same
-            if volume_increase <= 0:
-                state.update_market_volume(market_id, current_volume)
-                continue
-
-            # Calculate percent increase
-            percent_increase = (volume_increase / previous_volume * 100) if previous_volume > 0 else 0
-
-            # Check if spike thresholds are met (only if not skipping alerts)
-            if not skip_alerts and (percent_increase >= VOLUME_PERCENT_THRESHOLD or
-                    volume_increase >= VOLUME_ABSOLUTE_THRESHOLD):
-                spikes.append((market, current_volume, previous_volume, percent_increase))
-
-            # Update stored volume
-            state.update_market_volume(market_id, current_volume)
-
-        except (ValueError, TypeError, ZeroDivisionError) as e:
-            logger.error(f"Error processing market {market.get('id')}: {e}")
-            continue
-
-    return spikes
-
-
-# ============================================================================
 # SUSPICIOUS ACTIVITY DETECTION
 # ============================================================================
 
@@ -616,6 +367,7 @@ class SuspiciousActivity:
     market_slug: str
     event_slug: str
     side: str
+    outcome: str  # The specific outcome being bet on (e.g., "Yes", "No", or option name)
     timestamp: int
     flags: List[str]  # List of triggered flags
     wallet_total_trades: int
@@ -684,6 +436,8 @@ def detect_suspicious_activity(
         market_slug = trade.get('slug', '')
         event_slug = trade.get('eventSlug', market_slug)
         side = trade.get('side', 'UNKNOWN')
+        # Get the specific outcome being bet on
+        outcome = trade.get('outcome', '') or trade.get('outcomeName', '') or trade.get('asset', '')
         timestamp = trade.get('timestamp', 0)
         condition_id = trade.get('conditionId', '')
 
@@ -741,6 +495,7 @@ def detect_suspicious_activity(
                 market_slug=market_slug,
                 event_slug=event_slug,
                 side=side,
+                outcome=outcome,
                 timestamp=timestamp,
                 flags=flags,
                 wallet_total_trades=total_trades,
@@ -760,94 +515,25 @@ def detect_suspicious_activity(
 # ALERT FUNCTIONS
 # ============================================================================
 
-def alert_new_event(event: Dict):
-    """Print alert for a new event/market and send Telegram notification."""
-    event_id = event.get('id', 'N/A')
-    title = event.get('title', 'Unknown Event')
-    slug = event.get('slug', '')
-    description = event.get('description', 'No description')
-
-    # Construct URL
-    url = f"https://polymarket.com/event/{slug}" if slug else "URL not available"
-
-    # Console output
-    logger.info("=" * 60)
-    logger.info("NEW MARKET DETECTED")
-    logger.info(f"Event ID: {event_id}")
-    logger.info(f"Title: {title}")
-    logger.info(f"URL: {url}")
-    logger.info(f"Description: {description[:150]}...")
-    logger.info("=" * 60)
-
-    # Telegram notification (with HTML escaping for user content)
-    if telegram_bot:
-        safe_title = escape_html(title)
-        safe_description = escape_html(description[:200])
-        telegram_message = (
-            f"🆕 <b>NEW MARKET DETECTED</b>\n\n"
-            f"<b>Event ID:</b> {event_id}\n"
-            f"<b>Title:</b> {safe_title}\n"
-            f"<b>Description:</b> {safe_description}{'...' if len(description) > 200 else ''}\n\n"
-            f"<a href='{url}'>View on Polymarket</a>"
-        )
-        send_telegram_message(telegram_message)
-
-
-def alert_volume_spike(market: Dict, current_volume: float, previous_volume: float, percent_increase: float):
-    """Print alert for a volume spike and send Telegram notification."""
-    market_id = market.get('id', 'N/A')
-    question = market.get('question', 'Unknown Market')
-    slug = market.get('slug', '')
-
-    # Try to get event slug if available
-    event_slug = market.get('eventSlug', slug)
-    url = f"https://polymarket.com/event/{event_slug}" if event_slug else "URL not available"
-
-    volume_increase = current_volume - previous_volume
-
-    # Console output
-    logger.info("=" * 60)
-    logger.info("VOLUME SPIKE DETECTED")
-    logger.info(f"Market ID: {market_id}")
-    logger.info(f"Question: {question}")
-    logger.info(f"URL: {url}")
-    logger.info(f"Previous 24h Vol: ${previous_volume:,.2f}")
-    logger.info(f"Current 24h Vol: ${current_volume:,.2f}")
-    logger.info(f"Volume Increase: ${volume_increase:,.2f} (+{percent_increase:.1f}%)")
-    logger.info("=" * 60)
-
-    # Telegram notification (with HTML escaping for user content)
-    if telegram_bot:
-        safe_question = escape_html(question)
-        telegram_message = (
-            f"📈 <b>VOLUME SPIKE DETECTED</b>\n\n"
-            f"<b>Market ID:</b> {market_id}\n"
-            f"<b>Question:</b> {safe_question}\n\n"
-            f"<b>Previous 24h Volume:</b> ${previous_volume:,.2f}\n"
-            f"<b>Current 24h Volume:</b> ${current_volume:,.2f}\n"
-            f"<b>Volume Increase:</b> ${volume_increase:,.2f} (+{percent_increase:.1f}%)\n\n"
-            f"<a href='{url}'>View on Polymarket</a>"
-        )
-        send_telegram_message(telegram_message)
-
 
 def alert_suspicious_activity(activity: SuspiciousActivity):
     """Print alert for suspicious activity and send Telegram notification."""
-    wallet_short = f"{activity.wallet[:6]}...{activity.wallet[-4:]}"
-
     # Construct URL
     url = f"https://polymarket.com/event/{activity.event_slug}" if activity.event_slug else "URL not available"
 
     # Format timestamp
     trade_time = datetime.fromtimestamp(activity.timestamp).strftime('%Y-%m-%d %H:%M:%S') if activity.timestamp else 'Unknown'
 
+    # Format position (side + outcome)
+    position = f"{activity.side} {activity.outcome}" if activity.outcome else activity.side
+
     # Console output
     logger.info("=" * 60)
     logger.info("SUSPICIOUS ACTIVITY DETECTED")
-    logger.info(f"Wallet: {wallet_short}")
+    logger.info(f"Wallet: {activity.wallet}")
     logger.info(f"Flags: {', '.join(activity.flags)}")
     logger.info(f"Trade Size: ${activity.trade_size_usd:,.2f}")
-    logger.info(f"Side: {activity.side}")
+    logger.info(f"Position: {position}")
     logger.info(f"Market: {activity.market_title}")
     logger.info(f"Wallet Total Trades: {activity.wallet_total_trades}")
     logger.info(f"Time: {trade_time}")
@@ -857,6 +543,7 @@ def alert_suspicious_activity(activity: SuspiciousActivity):
     # Telegram notification
     if telegram_bot:
         safe_title = escape_html(activity.market_title)
+        safe_outcome = escape_html(activity.outcome) if activity.outcome else ''
         flags_str = ' | '.join(activity.flags)
 
         # Determine emoji based on severity
@@ -868,12 +555,15 @@ def alert_suspicious_activity(activity: SuspiciousActivity):
         else:
             emoji = "🔍"  # Low severity
 
+        # Format position for telegram
+        position_display = f"{activity.side} <b>{safe_outcome}</b>" if safe_outcome else activity.side
+
         telegram_message = (
             f"{emoji} <b>SUSPICIOUS ACTIVITY</b>\n\n"
             f"<b>Flags:</b> {flags_str}\n\n"
-            f"<b>Wallet:</b> <code>{wallet_short}</code>\n"
+            f"<b>Wallet:</b>\n<code>{activity.wallet}</code>\n\n"
             f"<b>Trade Size:</b> ${activity.trade_size_usd:,.2f}\n"
-            f"<b>Side:</b> {activity.side}\n"
+            f"<b>Position:</b> {position_display}\n"
             f"<b>Market:</b> {safe_title}\n"
             f"<b>Wallet History:</b> {activity.wallet_total_trades} total trades\n"
             f"<b>Time:</b> {trade_time}\n\n"
@@ -917,7 +607,6 @@ def monitor_polymarket():
     logger.info("=" * 60)
     logger.info("POLYMARKET MONITOR BOT STARTED")
     logger.info("=" * 60)
-    logger.info(f"Volume Spike Thresholds: {VOLUME_PERCENT_THRESHOLD}% or ${VOLUME_ABSOLUTE_THRESHOLD:,}")
     logger.info(f"Suspicious Activity: Large bets >= ${LARGE_BET_THRESHOLD:,.0f}, Fresh wallets <= {FRESH_WALLET_MAX_TRADES} trades")
     logger.info(f"Check Interval: {CHECK_INTERVAL_SECONDS} seconds")
     logger.info(f"State File: {STATE_FILE if STATE_FILE else 'Memory only'}")
@@ -933,14 +622,12 @@ def monitor_polymarket():
     if telegram_bot and not state.first_run:
         startup_message = (
             f"🤖 <b>Polymarket Monitor Started</b>\n\n"
-            f"<b>Volume Spike Thresholds:</b>\n"
-            f"  • Increase: {VOLUME_PERCENT_THRESHOLD}% or ${VOLUME_ABSOLUTE_THRESHOLD:,}\n\n"
             f"<b>Suspicious Activity Detection:</b>\n"
             f"  • Large bets: >= ${LARGE_BET_THRESHOLD:,.0f}\n"
             f"  • Fresh wallets: <= {FRESH_WALLET_MAX_TRADES} trades\n"
             f"  • Political repeats: >= {POLITICAL_REPEAT_THRESHOLD}x\n\n"
             f"<b>Check Interval:</b> {CHECK_INTERVAL_SECONDS} seconds\n"
-            f"<b>Tracking:</b> {len(state.market_volumes)} markets, {len(political_event_ids)} political events\n\n"
+            f"<b>Tracking:</b> {len(political_event_ids)} political events\n\n"
             f"Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         send_telegram_message(startup_message)
@@ -952,25 +639,11 @@ def monitor_polymarket():
         logger.info(f"Starting check #{iteration}...")
 
         try:
-            # Fetch markets (sorted by volume - trending)
-            logger.info("Fetching markets...")
-            markets = fetch_all_markets()
-            logger.info(f"Fetched {len(markets)} active markets")
-
             # On first run, populate state without sending alerts
             skip_alerts = state.first_run
 
             if skip_alerts:
                 logger.info("First run - populating baseline state (no alerts will be sent)")
-
-            # Detect volume spikes
-            spikes = detect_volume_spikes(markets, state, skip_alerts=skip_alerts)
-            if spikes:
-                logger.info(f"Found {len(spikes)} volume spike(s)!")
-                for market, curr_vol, prev_vol, pct_inc in spikes:
-                    alert_volume_spike(market, curr_vol, prev_vol, pct_inc)
-            else:
-                logger.info("No volume spikes detected")
 
             # Detect suspicious activity (skip on first run)
             if not skip_alerts:
@@ -996,21 +669,15 @@ def monitor_polymarket():
             # Complete first run if applicable
             if state.first_run:
                 state.complete_first_run()
-                logger.info(f"Initialization complete. Now tracking {len(state.market_volumes)} markets.")
+                logger.info(f"Initialization complete. Now tracking {len(political_event_ids)} political events.")
                 if telegram_bot:
                     send_telegram_message(
                         f"🤖 <b>Polymarket Monitor Initialized</b>\n\n"
                         f"Baseline established. Now tracking:\n"
-                        f"  • {len(state.market_volumes)} markets (by volume)\n"
                         f"  • {len(political_event_ids)} political events\n\n"
                         f"Alerts will be sent for:\n"
-                        f"  • Volume spikes\n"
                         f"  • Suspicious activity (fresh wallets, large bets, political repeats)"
                     )
-
-            # Cleanup stale markets periodically (every 10 iterations)
-            if iteration % 10 == 0:
-                state.cleanup_stale_markets()
 
             # Batch save state at end of cycle (instead of per-update)
             state.save_state()
