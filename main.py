@@ -55,6 +55,16 @@ POLITICAL_KEYWORDS = ['election', 'president', 'trump', 'biden', 'congress',
                       'senate', 'governor', 'vote', 'primary', 'democrat',
                       'republican', 'political', 'politician', 'poll']
 
+# Sports keywords to filter out (sports markets are not monitored)
+SPORTS_KEYWORDS = [
+    'nba', 'nfl', 'mlb', 'nhl', 'mls', 'pga', 'atp', 'wta', 'ufc', 'f1',
+    'super bowl', 'world series', 'stanley cup', 'world cup', 'olympics',
+    'soccer', 'football', 'basketball', 'baseball', 'hockey', 'tennis',
+    'golf', 'mma', 'boxing', 'formula 1', 'nascar',
+    'playoff', 'playoffs', 'finals', 'championship', 'tournament',
+    'win the 202', 'beat the', 'defeat',
+]
+
 # Monitoring interval
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "120"))
 
@@ -257,6 +267,11 @@ def fetch_with_retry(url: str, params: Dict[str, Any]) -> Optional[requests.Resp
     return None
 
 
+def is_sports_market(title: str, slug: str = '') -> bool:
+    """Check if a market is sports-related based on keywords."""
+    combined = f"{title} {slug}".lower()
+    return any(kw in combined for kw in SPORTS_KEYWORDS)
+
 
 def fetch_recent_trades(limit: int = 100, min_usd: float = None) -> List[Dict]:
     """
@@ -437,6 +452,12 @@ def detect_suspicious_activity(
         market_title = trade.get('title', 'Unknown')
         market_slug = trade.get('slug', '')
         event_slug = trade.get('eventSlug', market_slug)
+
+        # Skip sports markets (not monitored)
+        if is_sports_market(market_title, market_slug):
+            logger.debug(f"Skipping sports market: {market_title}")
+            continue
+
         side = trade.get('side', 'UNKNOWN')
         # Get the specific outcome being bet on
         outcome = trade.get('outcome', '') or trade.get('outcomeName', '') or trade.get('asset', '')
@@ -692,7 +713,7 @@ def monitor_polymarket():
             logger.error(f"Unexpected error during monitoring: {e}")
             logger.info(f"Will retry in {CHECK_INTERVAL_SECONDS} seconds...")
 
-        # Sleep until next check (interruptible)
+        # Sleep until next check (interrupt
         for _ in range(CHECK_INTERVAL_SECONDS):
             if shutdown_requested:
                 break
