@@ -48,7 +48,7 @@ ENABLE_TELEGRAM = os.getenv("ENABLE_TELEGRAM", "true").lower() == "true"
 LARGE_BET_THRESHOLD = float(os.getenv("LARGE_BET_THRESHOLD", "10000"))  # USD
 FRESH_WALLET_MAX_TRADES = int(os.getenv("FRESH_WALLET_MAX_TRADES", "0"))  # 0 = completely new wallet (first trade ever)
 POLITICAL_REPEAT_THRESHOLD = int(os.getenv("POLITICAL_REPEAT_THRESHOLD", "3"))  # Repeated entries
-MAX_BUY_PRICE = float(os.getenv("MAX_BUY_PRICE", "0.70"))  # Max price to track (filters out 99% bots)
+MAX_BUY_PRICE = float(os.getenv("MAX_BUY_PRICE", "0.30"))  # Max price to track (only track low-odds bets)
 
 # Political keywords for market detection
 POLITICAL_KEYWORDS = ['election', 'president', 'trump', 'biden', 'congress',
@@ -464,8 +464,8 @@ def detect_suspicious_activity(
         timestamp = trade.get('timestamp', 0)
         condition_id = trade.get('conditionId', '')
 
-        # Skip buys at high prices (bots buying near-certain outcomes for small wins)
-        if side == 'BUY' and price > MAX_BUY_PRICE:
+        # Skip trades at high prices (only track low-odds bets <= 30%)
+        if price > MAX_BUY_PRICE:
             continue
 
         # Create unique key for dedup
